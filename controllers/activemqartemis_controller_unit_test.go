@@ -125,13 +125,13 @@ func TestValidateBrokerPropsDuplicateOnFirstEquals(t *testing.T) {
 	assert.True(t, strings.Contains(condition.Message, "nameWith"))
 }
 
-func TestValidateBrokerPropsDuplicateOnFirstEqualsIncorrectButUnrealisticForOurBrokerConfigUsecase(t *testing.T) {
+func TestValidateBrokerPropsDistinctKeysWithEscapedEquals(t *testing.T) {
 
 	cr := &brokerv1beta1.ActiveMQArtemis{
 		Spec: brokerv1beta1.ActiveMQArtemisSpec{
 			BrokerProperties: []string{
-				"nameWith\\=equals_A_not_matched=X",
-				"nameWith\\=equals_B_not_matched=Y",
+				"addressSettings.\"modules.*.messages.events.type\\=timeSeries*\".enableMetrics=true",
+				"addressSettings.\"modules.*.messages.events.type\\=alarm*\".enableMetrics=true",
 			},
 		},
 	}
@@ -143,14 +143,10 @@ func TestValidateBrokerPropsDuplicateOnFirstEqualsIncorrectButUnrealisticForOurB
 
 	valid, retry := ri.validate(cr, k8sClient, *namer)
 
-	assert.False(t, valid)
+	assert.True(t, valid)
 	assert.False(t, retry)
 
-	assert.True(t, meta.IsStatusConditionFalse(cr.Status.Conditions, brokerv1beta1.ValidConditionType))
-
-	condition := meta.FindStatusCondition(cr.Status.Conditions, brokerv1beta1.ValidConditionType)
-	assert.Equal(t, condition.Reason, brokerv1beta1.ValidConditionFailedDuplicateBrokerPropertiesKey)
-	assert.True(t, strings.Contains(condition.Message, "nameWith"))
+	assert.False(t, meta.IsStatusConditionFalse(cr.Status.Conditions, brokerv1beta1.ValidConditionType))
 }
 
 func TestStatusPodsCheckCached(t *testing.T) {

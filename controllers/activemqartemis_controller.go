@@ -686,7 +686,7 @@ func DuplicateKeyIn(keyValues []string) string {
 	keysMap := map[string]string{}
 
 	for _, keyAndValue := range keyValues {
-		if key, _, found := strings.Cut(keyAndValue, "="); found {
+		if key, found := cutUnescapedEquals(keyAndValue); found {
 			_, duplicate := keysMap[key]
 			if !(duplicate) {
 				keysMap[key] = key
@@ -697,6 +697,16 @@ func DuplicateKeyIn(keyValues []string) string {
 	}
 
 	return ""
+}
+
+// cutUnescapedEquals returns the text before the first '=' that is not escaped with a backslash
+func cutUnescapedEquals(keyAndValue string) (string, bool) {
+	for index := 0; index < len(keyAndValue); index++ {
+		if keyAndValue[index] == '=' && (index == 0 || keyAndValue[index-1] != '\\') {
+			return keyAndValue[:index], true
+		}
+	}
+	return "", false
 }
 
 func AssertSecretContainsKey(secret corev1.Secret, key string, contextMessage string) *metav1.Condition {
