@@ -98,6 +98,7 @@ type Namers struct {
 	PodsNameBuilder               namer.NamerData
 	SecretsCredentialsNameBuilder namer.NamerData
 	SecretsConsoleNameBuilder     namer.NamerData
+	SecretsConsoleInternalBuilder namer.NamerData
 	SecretsNettyNameBuilder       namer.NamerData
 	LabelBuilder                  selectors.LabelerData
 	GLOBAL_DATA_PATH              string

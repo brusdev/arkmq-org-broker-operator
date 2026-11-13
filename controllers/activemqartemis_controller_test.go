@@ -308,6 +308,251 @@ var _ = Describe("artemis controller", func() {
 				CleanResource(commonSecret, commonSecret.Name, defaultNamespace)
 			}
 		})
+
+		It("console and acceptor share one secret between two crs", func() {
+			if os.Getenv("USE_EXISTING_CLUSTER") == "true" {
+
+				By("Creating the secret shared by both crs")
+				commonSecretName := "shared-amq-tls-secret"
+				commonSecret, err := CreateTlsSecret(commonSecretName, defaultNamespace, defaultPassword, defaultSanDnsNames)
+				Expect(err).To(BeNil())
+				Expect(k8sClient.Create(ctx, commonSecret)).Should(Succeed())
+
+				configureSharedSecret := func(candidate *brokerv1beta1.ActiveMQArtemis) {
+					candidate.Spec.Console.SSLEnabled = true
+					candidate.Spec.Console.SSLSecret = commonSecretName
+
+					candidate.Spec.Acceptors = []brokerv1beta1.AcceptorType{
+						{
+							Name:       "amqp-ssl",
+							Protocols:  "amqp",
+							Port:       5671,
+							SSLEnabled: true,
+							SSLSecret:  commonSecretName,
+						},
+					}
+				}
+
+				By("Deploying the first broker cr")
+				brokerCr1, createdBrokerCr1 := DeployCustomBroker(defaultNamespace, configureSharedSecret)
+
+				By("Deploying the second broker cr")
+				brokerCr2, createdBrokerCr2 := DeployCustomBroker(defaultNamespace, configureSharedSecret)
+				Expect(brokerCr2.Name).ShouldNot(Equal(brokerCr1.Name))
+
+				By("verifying both pods are up")
+				WaitForPod(brokerCr1.Name)
+				WaitForPod(brokerCr2.Name)
+
+				By("verifying both crs are deployed and ready")
+				for _, cr := range []*brokerv1beta1.ActiveMQArtemis{createdBrokerCr1, createdBrokerCr2} {
+					crKey := types.NamespacedName{Name: cr.Name, Namespace: cr.Namespace}
+					Eventually(func(g Gomega) {
+						g.Expect(k8sClient.Get(ctx, crKey, cr)).Should(Succeed())
+						g.Expect(meta.IsStatusConditionTrue(cr.Status.Conditions, brokerv1beta1.ValidConditionType)).Should(BeTrue())
+						g.Expect(meta.IsStatusConditionTrue(cr.Status.Conditions, brokerv1beta1.DeployedConditionType)).Should(BeTrue())
+						g.Expect(meta.IsStatusConditionTrue(cr.Status.Conditions, brokerv1beta1.ReadyConditionType)).Should(BeTrue())
+					}, existingClusterTimeout, existingClusterInterval).Should(Succeed())
+				}
+
+				By("verifying both statefulsets mount the shared secret")
+				for _, crName := range []string{brokerCr1.Name, brokerCr2.Name} {
+					ssKey := types.NamespacedName{Name: namer.CrToSS(crName), Namespace: defaultNamespace}
+					currentSS := &appsv1.StatefulSet{}
+					Eventually(func(g Gomega) {
+						g.Expect(k8sClient.Get(ctx, ssKey, currentSS)).Should(Succeed())
+
+						sharedVolumes := 0
+						for _, volume := range currentSS.Spec.Template.Spec.Volumes {
+							if volume.Secret != nil && volume.Secret.SecretName == commonSecretName {
+								sharedVolumes++
+							}
+						}
+						// the console and the acceptor share a single volume
+						g.Expect(sharedVolumes).Should(Equal(1))
+					}, existingClusterTimeout, existingClusterInterval).Should(Succeed())
+				}
+
+				By("deleting the first cr")
+				CleanResource(createdBrokerCr1, createdBrokerCr1.Name, defaultNamespace)
+
+				By("verifying the shared secret is still there")
+				secretKey := types.NamespacedName{Name: commonSecretName, Namespace: defaultNamespace}
+				Expect(k8sClient.Get(ctx, secretKey, &corev1.Secret{})).Should(Succeed())
+
+				By("verifying the second cr is still ready")
+				crKey2 := types.NamespacedName{Name: createdBrokerCr2.Name, Namespace: defaultNamespace}
+				Consistently(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, crKey2, createdBrokerCr2)).Should(Succeed())
+					g.Expect(meta.IsStatusConditionTrue(createdBrokerCr2.Status.Conditions, brokerv1beta1.ReadyConditionType)).Should(BeTrue())
+				}, existingClusterInterval*5, existingClusterInterval).Should(Succeed())
+
+				CleanResource(createdBrokerCr2, createdBrokerCr2.Name, defaultNamespace)
+				CleanResource(commonSecret, commonSecret.Name, defaultNamespace)
+			}
+		})
+
+		It("console https configured with extraMounts secret and AMQ_CONSOLE_ARGS", Label("console-extra-mount-ssl"), func() {
+			if os.Getenv("USE_EXISTING_CLUSTER") == "true" {
+
+				By("Creating the tls secret to be mounted manually via extraMounts")
+				tlsSecretName := "console-extra-mount-tls"
+				tlsSecret, err := CreateTlsSecret(tlsSecretName, defaultNamespace, defaultPassword, defaultSanDnsNames)
+				Expect(err).To(BeNil())
+				Expect(k8sClient.Create(ctx, tlsSecret)).Should(Succeed())
+
+				mountPath := "/amq/extra/secrets/" + tlsSecretName
+				consoleArgs := "--ssl-key " + mountPath + "/broker.ks" +
+					" --ssl-key-password " + defaultPassword +
+					" --ssl-trust " + mountPath + "/client.ts" +
+					" --ssl-trust-password " + defaultPassword
+
+				By("Deploying the broker cr without spec.console.sslSecret")
+				brokerCr, createdBrokerCr := DeployCustomBroker(defaultNamespace, func(candidate *brokerv1beta1.ActiveMQArtemis) {
+					candidate.Spec.AdminUser = "admin"
+					candidate.Spec.AdminPassword = "password"
+					candidate.Spec.DeploymentPlan.ExtraMounts.Secrets = []string{tlsSecretName}
+					candidate.Spec.Env = []corev1.EnvVar{
+						{Name: "AMQ_CONSOLE_ARGS", Value: consoleArgs},
+					}
+				})
+				Expect(createdBrokerCr.Spec.Console.SSLEnabled).Should(BeFalse())
+				Expect(createdBrokerCr.Spec.Console.SSLSecret).Should(BeEmpty())
+
+				WaitForPod(brokerCr.Name)
+
+				By("verifying the secret is mounted and the console args are set on the statefulset")
+				ssKey := types.NamespacedName{Name: namer.CrToSS(brokerCr.Name), Namespace: defaultNamespace}
+				currentSS := &appsv1.StatefulSet{}
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, ssKey, currentSS)).Should(Succeed())
+
+					brokerContainer := currentSS.Spec.Template.Spec.Containers[0]
+
+					mountFound := false
+					for _, mount := range brokerContainer.VolumeMounts {
+						if mount.MountPath == mountPath {
+							mountFound = true
+						}
+					}
+					g.Expect(mountFound).Should(BeTrue())
+
+					consoleArgsFound := false
+					for _, env := range brokerContainer.Env {
+						if env.Name == "AMQ_CONSOLE_ARGS" {
+							consoleArgsFound = true
+							g.Expect(env.Value).Should(Equal(consoleArgs))
+						}
+					}
+					g.Expect(consoleArgsFound).Should(BeTrue())
+				}, existingClusterTimeout, existingClusterInterval).Should(Succeed())
+
+				By("verifying the console is served over https with the mounted keystore")
+				podWithOrdinal0 := namer.CrToSS(brokerCr.Name) + "-0"
+				curlUrl := "https://" + podWithOrdinal0 + ":8161/console/jolokia/read/org.apache.activemq.artemis:broker=%22amq-broker%22/Status"
+				curlCmd := []string{"curl", "-s", "-k", "-H", "Origin: https://localhost:8161", "-u", "admin:password", curlUrl}
+				Eventually(func(g Gomega) {
+					result, err := RunCommandInPod(podWithOrdinal0, brokerCr.Name+"-container", curlCmd)
+					g.Expect(err).To(BeNil())
+					g.Expect(*result).To(ContainSubstring(`"status":200`))
+				}, existingClusterTimeout, existingClusterInterval).Should(Succeed())
+
+				By("Deploying a second cr sharing the secret: console via extraMounts and AMQ_CONSOLE_ARGS, acceptor via sslSecret")
+				brokerCr2, createdBrokerCr2 := DeployCustomBroker(defaultNamespace, func(candidate *brokerv1beta1.ActiveMQArtemis) {
+					candidate.Spec.AdminUser = "admin"
+					candidate.Spec.AdminPassword = "password"
+					candidate.Spec.DeploymentPlan.ExtraMounts.Secrets = []string{tlsSecretName}
+					candidate.Spec.Env = []corev1.EnvVar{
+						{Name: "AMQ_CONSOLE_ARGS", Value: consoleArgs},
+					}
+					candidate.Spec.Acceptors = []brokerv1beta1.AcceptorType{
+						{
+							Name:       "amqp-ssl",
+							Protocols:  "amqp",
+							Port:       5671,
+							SSLEnabled: true,
+							SSLSecret:  tlsSecretName,
+						},
+					}
+				})
+				Expect(brokerCr2.Name).ShouldNot(Equal(brokerCr.Name))
+				Expect(createdBrokerCr2.Spec.Console.SSLEnabled).Should(BeFalse())
+				Expect(createdBrokerCr2.Spec.Console.SSLSecret).Should(BeEmpty())
+
+				WaitForPod(brokerCr2.Name)
+
+				By("verifying the second cr is deployed and ready")
+				crKey2 := types.NamespacedName{Name: createdBrokerCr2.Name, Namespace: createdBrokerCr2.Namespace}
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, crKey2, createdBrokerCr2)).Should(Succeed())
+					g.Expect(meta.IsStatusConditionTrue(createdBrokerCr2.Status.Conditions, brokerv1beta1.ValidConditionType)).Should(BeTrue())
+					g.Expect(meta.IsStatusConditionTrue(createdBrokerCr2.Status.Conditions, brokerv1beta1.DeployedConditionType)).Should(BeTrue())
+					g.Expect(meta.IsStatusConditionTrue(createdBrokerCr2.Status.Conditions, brokerv1beta1.ReadyConditionType)).Should(BeTrue())
+				}, existingClusterTimeout, existingClusterInterval).Should(Succeed())
+
+				By("verifying the second cr mounts the secret for the console via extraMounts and for the acceptor via sslSecret")
+				ssKey2 := types.NamespacedName{Name: namer.CrToSS(brokerCr2.Name), Namespace: defaultNamespace}
+				currentSS2 := &appsv1.StatefulSet{}
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, ssKey2, currentSS2)).Should(Succeed())
+
+					// extraMounts volume (console) and acceptor volume are distinct volumes of the same secret
+					secretVolumes := 0
+					for _, volume := range currentSS2.Spec.Template.Spec.Volumes {
+						if volume.Secret != nil && volume.Secret.SecretName == tlsSecretName {
+							secretVolumes++
+						}
+					}
+					g.Expect(secretVolumes).Should(Equal(2))
+
+					brokerContainer := currentSS2.Spec.Template.Spec.Containers[0]
+
+					extraMountFound := false
+					acceptorMountFound := false
+					for _, mount := range brokerContainer.VolumeMounts {
+						if mount.MountPath == mountPath {
+							extraMountFound = true
+						}
+						if mount.MountPath == "/etc/"+tlsSecretName+"-volume" {
+							acceptorMountFound = true
+						}
+					}
+					g.Expect(extraMountFound).Should(BeTrue())
+					g.Expect(acceptorMountFound).Should(BeTrue())
+
+					consoleArgsFound := false
+					for _, env := range brokerContainer.Env {
+						if env.Name == "AMQ_CONSOLE_ARGS" {
+							consoleArgsFound = true
+							g.Expect(env.Value).Should(Equal(consoleArgs))
+						}
+					}
+					g.Expect(consoleArgsFound).Should(BeTrue())
+				}, existingClusterTimeout, existingClusterInterval).Should(Succeed())
+
+				By("verifying the second cr's console is served over https with the mounted keystore")
+				podWithOrdinal0Cr2 := namer.CrToSS(brokerCr2.Name) + "-0"
+				curlUrl2 := "https://" + podWithOrdinal0Cr2 + ":8161/console/jolokia/read/org.apache.activemq.artemis:broker=%22amq-broker%22/Status"
+				curlCmd2 := []string{"curl", "-s", "-k", "-H", "Origin: https://localhost:8161", "-u", "admin:password", curlUrl2}
+				Eventually(func(g Gomega) {
+					result, err := RunCommandInPod(podWithOrdinal0Cr2, brokerCr2.Name+"-container", curlCmd2)
+					g.Expect(err).To(BeNil())
+					g.Expect(*result).To(ContainSubstring(`"status":200`))
+				}, existingClusterTimeout, existingClusterInterval).Should(Succeed())
+
+				By("deleting the first cr and verifying the shared secret and the second cr are unaffected")
+				CleanResource(createdBrokerCr, createdBrokerCr.Name, defaultNamespace)
+
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: tlsSecretName, Namespace: defaultNamespace}, &corev1.Secret{})).Should(Succeed())
+				Consistently(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, crKey2, createdBrokerCr2)).Should(Succeed())
+					g.Expect(meta.IsStatusConditionTrue(createdBrokerCr2.Status.Conditions, brokerv1beta1.ReadyConditionType)).Should(BeTrue())
+				}, existingClusterInterval*5, existingClusterInterval).Should(Succeed())
+
+				CleanResource(createdBrokerCr2, createdBrokerCr2.Name, defaultNamespace)
+				CleanResource(tlsSecret, tlsSecret.Name, defaultNamespace)
+			}
+		})
 	})
 
 	Context("Statefulset options", Label("statefulset-options"), func() {
@@ -3971,6 +4216,59 @@ var _ = Describe("artemis controller", func() {
 			}
 			Expect(foundSecretRef).To(BeTrue())
 			Expect(foundSecretKey).To(BeTrue())
+			CleanResource(tlsSecret, tlsSecret.Name, tlsSecret.Namespace)
+		})
+
+		It("two crs sharing console sslSecret use distinct internal secrets", func() {
+
+			sharedSecretName := "shared-console-tls-secret"
+			tlsSecret, err := CreateTlsSecret(sharedSecretName, defaultNamespace, "password", nil)
+			Expect(err).To(BeNil())
+			Expect(k8sClient.Create(ctx, tlsSecret)).To(Succeed())
+
+			outer := NewActiveMQArtemisReconciler(k8Manager, ctrl.Log, isOpenshift)
+
+			internalSecretNames := []string{}
+			for i := 0; i < 2; i++ {
+				crd := generateArtemisSpec(defaultNamespace)
+				crd.Spec.Console.SSLEnabled = true
+				crd.Spec.Console.SSLSecret = sharedSecretName
+				reconcilerImpl := NewActiveMQArtemisReconcilerImpl(&crd, outer)
+
+				currentSS := &appsv1.StatefulSet{}
+				currentSS.Name = namer.CrToSS(crd.Name)
+				currentSS.Namespace = defaultNamespace
+				currentSS.Spec.Template.Spec.Containers = []corev1.Container{{Name: "container"}}
+
+				crNamer := MakeNamers(&crd)
+				Expect(reconcilerImpl.ProcessConsole(&crd, *crNamer, brokerReconciler.Client, brokerReconciler.Scheme, currentSS)).Should(Succeed())
+
+				expectedInternalSecretName := crd.Name + "-console-secret-internal"
+				internalSecretNames = append(internalSecretNames, expectedInternalSecretName)
+
+				foundInternalSecret := false
+				for _, reqres := range common.ToResourceList(reconcilerImpl.requestedResources) {
+					if reqres.GetObjectKind().GroupVersionKind().Kind == "Secret" {
+						secret := reqres.(*corev1.Secret)
+						Expect(secret.Name).ShouldNot(Equal(sharedSecretName + "-internal"))
+						if secret.Name == expectedInternalSecretName {
+							foundInternalSecret = true
+						}
+					}
+				}
+				Expect(foundInternalSecret).To(BeTrue())
+
+				foundSecretRef := false
+				for _, evar := range currentSS.Spec.Template.Spec.Containers[0].Env {
+					if evar.Name == "AMQ_CONSOLE_ARGS" {
+						Expect(evar.ValueFrom.SecretKeyRef.Name).To(Equal(expectedInternalSecretName))
+						foundSecretRef = true
+					}
+				}
+				Expect(foundSecretRef).To(BeTrue())
+			}
+			Expect(internalSecretNames[0]).ShouldNot(Equal(internalSecretNames[1]))
+
 			CleanResource(tlsSecret, tlsSecret.Name, tlsSecret.Namespace)
 		})
 

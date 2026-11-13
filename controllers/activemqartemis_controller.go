@@ -774,6 +774,7 @@ func MakeNamers(customResource *brokerv1beta1.ActiveMQArtemis) *common.Namers {
 		PodsNameBuilder:               namer.NamerData{},
 		SecretsCredentialsNameBuilder: namer.NamerData{},
 		SecretsConsoleNameBuilder:     namer.NamerData{},
+		SecretsConsoleInternalBuilder: namer.NamerData{},
 		SecretsNettyNameBuilder:       namer.NamerData{},
 		LabelBuilder:                  selectors.LabelerData{},
 		GLOBAL_DATA_PATH:              "/opt/" + customResource.Name + "/data",
@@ -789,6 +790,8 @@ func MakeNamers(customResource *brokerv1beta1.ActiveMQArtemis) *common.Namers {
 	} else {
 		newNamers.SecretsConsoleNameBuilder.Prefix(customResource.Name).Base("console").Suffix("secret").Generate()
 	}
+	// always per cr, even when the console tls secret is shared between crs
+	newNamers.SecretsConsoleInternalBuilder.Prefix(customResource.Name).Base("console").Suffix("secret-internal").Generate()
 	newNamers.SecretsNettyNameBuilder.Prefix(customResource.Name).Base("netty").Suffix("secret").Generate()
 
 	newNamers.LabelBuilder.Base(customResource.Name).Suffix("app").Generate()

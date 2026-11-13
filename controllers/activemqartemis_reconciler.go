@@ -375,7 +375,7 @@ func (reconciler *ActiveMQArtemisReconcilerImpl) ProcessCredentials(customResour
 		AutoGen: true,
 	}
 
-	reconciler.sourceEnvVarFromSecret(customResource, namer, currentStatefulSet, &envVars, secretName, client)
+	reconciler.sourceEnvVarFromSecret(customResource, namer, currentStatefulSet, &envVars, secretName, secretName+"-internal", client)
 }
 
 func (reconciler *ActiveMQArtemisReconcilerImpl) ProcessDeploymentPlan(customResource *brokerv1beta1.ActiveMQArtemis, theNamer common.Namers, client rtclient.Client, scheme *runtime.Scheme, currentStatefulSet *appsv1.StatefulSet) {
@@ -580,7 +580,7 @@ func (reconciler *ActiveMQArtemisReconcilerImpl) ProcessAcceptorsAndConnectors(c
 	}
 
 	secretName := namer.SecretsNettyNameBuilder.Name()
-	reconciler.sourceEnvVarFromSecret(customResource, namer, currentStatefulSet, &envVars, secretName, client)
+	reconciler.sourceEnvVarFromSecret(customResource, namer, currentStatefulSet, &envVars, secretName, secretName+"-internal", client)
 	return nil
 }
 
@@ -617,7 +617,8 @@ func (reconciler *ActiveMQArtemisReconcilerImpl) ProcessConsole(customResource *
 			Internal: true,
 		}}
 
-		reconciler.sourceEnvVarFromSecret(customResource, namer, currentStatefulSet, &envVars, secretName, client)
+		// the console tls secret may be shared between crs, the internal secret must be per cr
+		reconciler.sourceEnvVarFromSecret(customResource, namer, currentStatefulSet, &envVars, secretName, namer.SecretsConsoleInternalBuilder.Name(), client)
 	}
 
 	return nil
@@ -705,7 +706,7 @@ func isLocalOnly() bool {
 	return oprNamespace == watchNamespace
 }
 
-func (reconciler *ActiveMQArtemisReconcilerImpl) sourceEnvVarFromSecret(customResource *brokerv1beta1.ActiveMQArtemis, namer common.Namers, currentStatefulSet *appsv1.StatefulSet, envVars *map[string]ValueInfo, secretName string, client rtclient.Client) {
+func (reconciler *ActiveMQArtemisReconcilerImpl) sourceEnvVarFromSecret(customResource *brokerv1beta1.ActiveMQArtemis, namer common.Namers, currentStatefulSet *appsv1.StatefulSet, envVars *map[string]ValueInfo, secretName string, internalSecretName string, client rtclient.Client) {
 
 	var log = reconciler.log.WithName("controller_v1beta1activemqartemis").WithName("sourceEnvVarFromSecret")
 
@@ -772,7 +773,6 @@ func (reconciler *ActiveMQArtemisReconcilerImpl) sourceEnvVarFromSecret(customRe
 		reconciler.trackDesired(secretDefinition)
 	}
 
-	internalSecretName := secretName + "-internal"
 	internalNamespacedName := types.NamespacedName{
 		Name:      internalSecretName,
 		Namespace: currentStatefulSet.Namespace,
